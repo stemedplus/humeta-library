@@ -224,3 +224,19 @@ def test_no_studies_still_builds_the_studies_page(tmp_path):
     B.main(["--out", str(out), "--datasets", str(tmp_path / "missing.json"), "--studies", str(tmp_path / "missing.json")])
     assert "No studies have been registered" in (out / "studies" / "index.html").read_text(encoding="utf-8")
     assert json.loads((out / "data" / "studies.json").read_text(encoding="utf-8"))["studies"] == []
+
+
+def test_instruments_feed(site):
+    import xml.etree.ElementTree as ET
+    rss = ET.parse(site / "feeds" / "instruments.xml").getroot()
+    items = rss.findall("channel/item")
+    assert len(items) == len(load().instruments)
+    for item in items:
+        link = item.findtext("link")
+        assert link.startswith(B.LIBRARY_SITE_URL + "instruments/")
+        assert (site / link[len(B.LIBRARY_SITE_URL):] / "index.html").exists()
+    assert 'href="feeds/instruments.xml"' in (site / "index.html").read_text(encoding="utf-8")
+
+
+def test_site_address_is_the_live_one():
+    assert B.LIBRARY_SITE_URL == "https://stemedplus.github.io/humeta-library/"

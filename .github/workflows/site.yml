@@ -27,6 +27,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+          fetch-depth: 0  # full history: the instruments feed dates each instrument by when it was added
       - uses: actions/checkout@v7
         with:
           repository: JLib271/HuMeta

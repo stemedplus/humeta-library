@@ -7,7 +7,7 @@ a reference page for response scales and standard variables, a search page,
 and downloads (the library's JSON records and CSV lists). It reads the library
 through ``oem.library.Library``, the same reader the HuMeta Portal uses, so
 the site and the app always show the same records. That code lives in the
-HuMeta Portal repository: clone https://github.com/JLib271/HuMeta next to this
+HuMeta Portal repository: clone https://github.com/stemedplus/HuMeta next to this
 repository (or set ``HUMETA_DIR`` to a checkout of it). Labels for HuMeta
 vocabulary terms come from the profile copy in that checkout.
 
@@ -32,12 +32,16 @@ import hashlib
 import io
 import json
 import os
+import re
 import shutil
+import subprocess
 import sys
 import tarfile
-from datetime import date
+from datetime import date, datetime, timezone
+from email.utils import format_datetime
 from html import escape
 from pathlib import Path
+from xml.sax.saxutils import escape as xml_escape
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -47,7 +51,7 @@ def find_humeta() -> Path:
     for candidate in (os.environ.get("HUMETA_DIR"), REPO.parent / "HuMeta", REPO.parent / "humeta"):
         if candidate and (Path(candidate) / "oem" / "library.py").is_file():
             return Path(candidate).resolve()
-    raise SystemExit("The site builder uses the HuMeta Portal's code. Clone https://github.com/JLib271/HuMeta "
+    raise SystemExit("The site builder uses the HuMeta Portal's code. Clone https://github.com/stemedplus/HuMeta "
                      "next to this repository, or set HUMETA_DIR to a checkout of it.")
 
 
@@ -60,9 +64,9 @@ from oem.library import Library  # noqa: E402
 from oem.vocab import PORTAL_URL  # noqa: E402
 
 #: This website's address
-LIBRARY_SITE_URL = "https://jlib271.github.io/humeta-library/"
+LIBRARY_SITE_URL = "https://stemedplus.github.io/humeta-library/"
 ASSETS = REPO / "site" / "assets"
-REPO_URL = "https://github.com/JLib271/humeta-library"
+REPO_URL = "https://github.com/stemedplus/humeta-library"
 #: The library's own files, as published in data/library.tar.gz for the HuMeta Portal
 DATA_DIRS = ("instruments", "items", "evidence", "schema")
 DATA_FILES = ("constructs.json", "frameworks.json", "scales.json", "standard_variables.json",
@@ -243,6 +247,7 @@ class Site:
 <link rel="canonical" href="{h(canonical)}">
 <link rel="stylesheet" href="{root}assets/style.css">
 <link rel="stylesheet" href="{root}assets/stemedplus-theme.css">
+<link rel="alternate" type="application/rss+xml" title="HuMeta Library: instruments" href="{root}feeds/instruments.xml">
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
@@ -262,13 +267,13 @@ class Site:
 <h2><a href="{COMMONS_URL}">More from STEMEd+ Commons</a></h2>
 <ul>
 {portal}
-<li>{ext("https://jlib271.github.io/stemed-deadlines/", "STEMEd+ Deadlines")}: every STEMEd+ deadline in one page and one calendar</li>
-<li>{ext("https://jlib271.github.io/stemed-conferences/", "STEMEd+ Conferences")}: meetings, proposal deadlines, and travel support for STEM+ education</li>
-<li>{ext("https://jlib271.github.io/STEMEd-Digest/", "STEMEd+ Digest")}: new journal articles, preprints, and dissertations</li>
-<li>{ext("https://jlib271.github.io/stemed-funding/", "STEMEd+ Funding")}: open calls and deadlines for STEM+ education</li>
-<li>{ext("https://jlib271.github.io/stem-ed-research-programs/", "STEM+ Education Research Graduate Programs")}: where to study STEM+ education research</li>
-<li>{ext("https://jlib271.github.io/stemed-jobs/", "STEMEd+ Jobs")}: positions in STEM+ education</li>
-<li>{ext("https://jlib271.github.io/stemed-professional-development/", "STEMEd+ Professional Development")}: national programs for K-12 teachers, informal educators, college faculty and instructors, and graduate students and postdocs</li>
+<li>{ext("https://stemedplus.github.io/stemed-deadlines/", "STEMEd+ Deadlines")}: every STEMEd+ deadline in one page and one calendar</li>
+<li>{ext("https://stemedplus.github.io/stemed-conferences/", "STEMEd+ Conferences")}: meetings, proposal deadlines, and travel support for STEM+ education</li>
+<li>{ext("https://stemedplus.github.io/STEMEd-Digest/", "STEMEd+ Digest")}: new journal articles, preprints, and dissertations</li>
+<li>{ext("https://stemedplus.github.io/stemed-funding/", "STEMEd+ Funding")}: open calls and deadlines for STEM+ education</li>
+<li>{ext("https://stemedplus.github.io/stem-ed-research-programs/", "STEM+ Education Research Graduate Programs")}: where to study STEM+ education research</li>
+<li>{ext("https://stemedplus.github.io/stemed-jobs/", "STEMEd+ Jobs")}: positions in STEM+ education</li>
+<li>{ext("https://stemedplus.github.io/stemed-professional-development/", "STEMEd+ Professional Development")}: national programs for K-12 teachers, informal educators, college faculty and instructors, and graduate students and postdocs</li>
 </ul>
 </div></footer>
 <script src="{root}assets/site.js"></script>
@@ -1400,6 +1405,51 @@ class Site:
                         "fields": fields, "text": " ".join([c.get("definition", "")] + c.get("synonyms", []) + c.get("eric", []))})
         return out
 
+    def added_dates(self) -> dict[str, str]:
+        """Instrument id -> the day its record was first added, from git history ({} without full history)."""
+        try:
+            if subprocess.run(["git", "rev-parse", "--is-shallow-repository"], cwd=REPO, capture_output=True,
+                              text=True, check=True).stdout.strip() == "true":
+                return {}
+            log = subprocess.run(["git", "log", "--diff-filter=A", "--name-only", "--format=%x00%as", "--",
+                                  "instruments/"], cwd=REPO, capture_output=True, text=True, check=True).stdout
+        except (OSError, subprocess.CalledProcessError):
+            return {}
+        dates, day = {}, ""
+        for line in log.splitlines():
+            if line.startswith("\x00"):
+                day = line[1:]
+            elif line.startswith("instruments/") and line.endswith(".json"):
+                dates[Path(line).stem] = day  # newest first: the last date seen is when it was first added
+        return dates
+
+    def instruments_feed(self) -> None:
+        """feeds/instruments.xml: library instruments, most recently added first."""
+        added = self.added_dates()
+        insts = sorted(self.lib.instruments.values(), key=lambda i: (added.get(i["id"], ""), i["name"].lower()),
+                       reverse=True)
+        items = []
+        for inst in insts:
+            name = inst["name"] + (f" ({inst['acronym']})" if inst.get("acronym") else "")
+            link = LIBRARY_SITE_URL + self.url("instruments", inst["id"])
+            date = ""
+            if added.get(inst["id"]):
+                day = datetime.strptime(added[inst["id"]], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+                date = f"<pubDate>{format_datetime(day)}</pubDate>"
+            cats = "".join(f"<category>{xml_escape(self.disc(d))}</category>" for d in inst.get("disciplines") or [])
+            desc = re.sub(r"\s+", " ", str(inst.get("description") or "")).strip()
+            items.append(f"<item><title>{xml_escape(name)}</title><link>{xml_escape(link)}</link>"
+                         f'<guid isPermaLink="true">{xml_escape(link)}</guid>{date}{cats}'
+                         f"<description>{xml_escape(desc)}</description></item>")
+        feed = ('<?xml version="1.0" encoding="utf-8"?>\n<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel>'
+                "<title>HuMeta Library: instruments</title>"
+                f"<link>{LIBRARY_SITE_URL}</link>"
+                f'<atom:link href="{LIBRARY_SITE_URL}feeds/instruments.xml" rel="self" type="application/rss+xml"/>'
+                "<description>Research instruments in the HuMeta Library, most recently added first.</description>"
+                "<language>en</language>" + "".join(items) + "</channel></rss>\n")
+        (self.out / "feeds").mkdir(exist_ok=True)
+        (self.out / "feeds" / "instruments.xml").write_text(feed, encoding="utf-8")
+
     def build(self) -> None:
         if self.out.exists():
             shutil.rmtree(self.out)
@@ -1428,6 +1478,7 @@ class Site:
                         '<h1>Page not found</h1><p>That record may have been renamed. '
                         f'<a href="{LIBRARY_SITE_URL}">Search the library</a>.</p>', depth=0)
         self.write_data()
+        self.instruments_feed()
         urls = "".join(f"<url><loc>{h(LIBRARY_SITE_URL + p)}</loc></url>" for p in self.pages)
         (self.out / "sitemap.xml").write_text(
             f'<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">{urls}</urlset>',
